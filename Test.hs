@@ -1,4 +1,6 @@
+import Prelude hiding (sum)                
 import Data.Foldable
+import Data.Complex
 import Control.Applicative
 import Linear
 
@@ -6,7 +8,6 @@ import Test.QuickCheck.Property
 import Test.QuickCheck.Modifiers
 
 import MaxEnt
-import BunseGurstner
 
 expModel :: RealFloat a => a -> V1 a -> a
 expModel tau (V1 t) = exp (-t/tau)         
@@ -23,52 +24,9 @@ main = do
         basis = subspace pts f models
         m = hc `projectInto` basis
         g = fmap (\em->fmap (em `dot`) basis) basis
-    --print $ eigen3 g
-    --print $ eigen3 m
+    print $ eigen3 g
+    print $ eigen3 m
     
-    --mapM (putStrLn . showMatrix . (\d->diagQ d !*! diagQ d))
-    mapM (\d->do print "hello"
-                 print $ offAxisNorm $ diagA d
-                 putStrLn $ showMatrix $ diagQ d !*! adjoint (diagQ d)
-                 --putStrLn $ showMatrix $ adjoint (diagQ d) !*! fmap (fmap realToFrac) m !*! diagQ d
-                 --putStrLn $ showMatrix $ diagQ d !*! fmap (fmap realToFrac) m !*! adjoint (diagQ d)
-                 putStrLn $ showMatrix $ diagA d
-                 putStrLn $ showMatrix $ diagB d
-         )
-      $ take 100 $ drop 00000
-      $ offAxisTerminate 0.01 $ simultDiag n m
-
-showMatrix :: (Functor f, Foldable f, Show a) => f (f a) -> String
-showMatrix a = unlines $ toList $ fmap (foldMap (pad 70 . show)) a
-  where pad n s = take n $ s ++ repeat ' '
-
-p :: V3 (V3 Double)
-p = V3 (V3 1 0 0)
-       (V3 0 1 1)
-       (V3 0 1 0)
-
-pinv = case inv33 p of Just a -> a
-
-m,n :: V3 (V3 Double)
-(m,n) = case commuting3 1 3 2 of
-          m:n:_ -> (her m, her n)
-   where her a = a + adjoint a
-
-commutator a b = a !*! b !-! b !*! a
-
--- | Family of commutative matricies
---
--- From,
---
---     E Pereira, C Rosa. "A method to construct sets of commuting
---     matrices"
-commuting3 :: Num a => a -> a -> a -> [M33 a]
-commuting3 x1 x2 x3 = iterate (^+^ eye3) a
-  where
-    a = V3 (V3 (x1+x2-x3)  (4*x3-x2)  (2*x2)   )
-           (V3 (x2-2*x3)   (x1-x2)     x3      )
-           (V3 (-4*x3)     (4*x3)     (x1+2*x3))
-           
 cubicSolves :: Double -> Double -> Property
 cubicSolves p q
   | nearZero p && nearZero q = property rejected

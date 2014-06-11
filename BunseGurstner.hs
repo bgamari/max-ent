@@ -9,26 +9,28 @@ module BunseGurstner
   ( simultDiag
   , offAxisTerminate, offAxisNorm
   , Diagonalization(..)
+  , frobeniusNorm
+  , cond
   ) where
 
-import Prelude hiding (sum)
+import Prelude hiding (sum, concatMap)
 import Linear
 import Control.Lens
 import Data.Ord
 import Data.Complex hiding (conjugate)
 import Data.Foldable
-import Debug.Trace
+import System.IO.Unsafe
 
 data Diagonalization f a = Diag { diagA, diagB, diagQ :: !(f (f a)) }
 
 -- | Simultaneous diagonalization of two normal matricies.
 --
 -- Requires that,
---     A B = B A
+--     A B   = B A
 --     A A^H = A^H A
 --     B B^H = B^H B
 --
-simultDiag :: (Conjugate a, RealFloat a, Show a)
+simultDiag :: (Conjugate a, RealFloat a, Epsilon a, Show a)
            => M33 a
            -> M33 a
            -> [Diagonalization V3 (Complex a)]
@@ -39,7 +41,7 @@ simultDiag a b = iterate go (Diag (toComplex a) (toComplex b) eye3)
     
     go d = foldl' rotPlane d [(ex,ey), (ex,ez), (ey,ez)] 
 
-    rotPlane :: (Conjugate a, RealFloat a, Show a)
+    rotPlane :: (Conjugate a, RealFloat a, Epsilon a, Show a)
              => Diagonalization V3 (Complex a)    -- ^ initial diagonalization
              -> (E V3, E V3)                      -- ^ plane
              -> Diagonalization V3 (Complex a)
@@ -48,9 +50,10 @@ simultDiag a b = iterate go (Diag (toComplex a) (toComplex b) eye3)
              (adjoint r !*! b !*! r)
              (q !*! r)
       where
-        (c, s) = rotationAngle a b (i,j)
-        --(c, s) = bruteForceAngle 100 100 a b (i,j)
-        r = traceShow (c, s) $ rotation i j c s
+        --(c, s) = rotationAngle a b (i,j)
+        (c, s) = bruteForceAngle 100 100 a b (i,j)
+        --(c, s) = optimizeAngle a b (i,j)
+        r = unsafePerformIO (print (c,s) >> return (rotation i j c s))
 {-# INLINE simultDiag #-}
 
 -- | Terminate the diagonalization when the off-axis norm has pass
@@ -103,7 +106,30 @@ bruteForceAngle nTheta nPhi a b plane =
       where d = (b - a) / realToFrac n
 {-# INLINE bruteForceAngle #-}
     
+{-
+optimizeAngle :: (Conjugate a, Ord a, RealFloat a)
+              => M33 (Complex a)
+              -> M33 (Complex a)
+              -> (E V3, E V3)
+              -> (a, Complex a)
+optimizeAngle a b plane =
+    head $ drop 50 $ gradientDescent f (V2 0 0)
+  where
+    f (V2 th phi) = cond (fmap (fmap realToFrac) a)
+                         (fmap (fmap realToFrac) b) plane
+                         (cos th, cis phi * realToFrac (sin th))
+
+gradDescent :: (f a -> a) -> f a -> [f a]
+gradDescent f x = go 1 x (finiteDiff 1 x)
+  where
+    go h x diffLast =
     
+    grad :: V2 a -> State (f a) a
+    grad x = do 
+        h <- get
+        kronecker h
+-}
+
 -- | Looking for minimizer of this
 cond :: (Conjugate a, Ord a, RealFloat a)
      => M33 (Complex a)  -- ^ first matrix
@@ -136,14 +162,14 @@ cond a b (E i, E j) (c, s) =
 {-# INLINE cond #-}
 
 -- | Pick a rotation
-rotationAngle :: (Conjugate a, Ord a, RealFloat a)
+rotationAngle :: (Conjugate a, Ord a, RealFloat a, Epsilon a)
               => M33 (Complex a)
               -> M33 (Complex a)
               -> (E V3, E V3)
               -> (a, Complex a)
 rotationAngle a b plane =
       minimumBy (comparing $ cond a b plane)
-    $ map (\f->f a plane)
+    $ concatMap (\f->[f a plane, f b plane])
     -- $ [goldstineAngle, eberleinAngle]
     $ [eberleinAngle]
 
@@ -160,14 +186,34 @@ eberleinAngle a (E i, E j) = (c, realToFrac s)
     s = sin x
   
 -- | Minimizing rotation angle due to Goldstine & Horwitz, 1958 (pg. 179)
-goldstineAngle :: (Conjugate a, Ord a, RealFloat a)
+goldstineAngle :: (Conjugate a, Ord a, RealFloat a, Epsilon a)
                => M33 (Complex a)
                -> (E V3, E V3)
                -> (a, Complex a)
-goldstineAngle a (E i, E j) = undefined
+goldstineAngle a (E i, E j) = (cos phi, cis alpha * realToFrac (sin phi))
   where
     -- Hermitian
-    a = undefined
+    b = (a !+! adjoint a) !!* recip 2
+    r i j = magnitude (b ^. i . j)
+    beta i j = phase (b ^. i . j)
+    u = r i i - r j j
+    -- Skew Hermitian
+    c = (a !-! adjoint a) !!* recip 2
+    s i j = magnitude (c ^. i . j)
+    gamma i j = phase (c ^. i . j)
+    v = s i i - s j j
+    -- 
+    t = u :+ v
+    kappa = u^2 + v^2 - 4*((r i j)^2 * (cos $ beta i j - alpha)^2 + (s i j)^2 * (sin $ gamma i j - alpha)^2)
+    lambd = 4 * (r i j * u * cos (beta i j - alpha) + s i j * v * sin (gamma i j - alpha))
+    --
+    phi = acos (signum kappa) / 4
+    alpha = let v = case beta i j - gamma i j of
+                      x | nearZero x  -> pi / 2
+                        | otherwise   -> x
+                num = (r i j + s i j)^2 * sin v
+                denom = (r i j + s i j)^2 * (sin v)^2 + (r i j - s i j)^2 * (cos v)^2
+            in (asin (-num / sqrt denom) - beta i j - gamma i j) / 2
 
 frobeniusNorm :: (Foldable f, Functor f, RealFloat a) => f (f (Complex a)) -> a
 frobeniusNorm a = sum $ fmap (sum . fmap (\x->(magnitude x)^2)) a

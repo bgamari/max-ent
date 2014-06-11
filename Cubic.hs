@@ -2,6 +2,9 @@ module Cubic (cubicTrig) where
 
 import Linear
 
+import Test.QuickCheck.Property
+import Test.QuickCheck.Modifiers
+
 -- | Trignometric solutions to a cubic equation `x^3 + p*x + q == 0`
 cubicTrig :: (Epsilon a, RealFloat a) => a -> a -> [a]
 cubicTrig p q
@@ -25,3 +28,16 @@ cubicTrig p q
     let theta = acosh (-3/2 * abs q / p * sqrt (-3/p))
     in [-2 * signum q * sqrt (-p/3) * cosh (theta / 3)]
 
+cubicSolves :: Double -> Double -> Property
+cubicSolves p q
+  | nearZero p && nearZero q = property rejected
+  | otherwise =
+    conjoin $ map solves $ cubicTrig p q
+  where
+     cubic x = x^3 + p*x + q
+     solves :: Double -> Property
+     --solves x | isNaN x = property rejected
+     solves x = counterexample msg $ nearZero $ (cubic x)^2
+       where msg = show x++" is not a root (f(x) = "++show (cubic x)++")"
+
+runTests = [property cubicSolves]

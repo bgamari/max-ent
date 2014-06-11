@@ -49,14 +49,14 @@ showMatrix a = unlines $ toList $ fmap (foldMap (pad 70 . show)) a
   where pad n s = take n $ s ++ repeat ' '
 
 p :: V3 (V3 Double)
-p = V3 (V3 1 0 0)
-       (V3 0 0 1)
-       (V3 1 0 1)
+p = V3 (V3 1 1 0)
+       (V3 1 3 2)
+       (V3 0 2 1)
 
 pinv = case inv33 p of Just a -> a
 
 m,n :: V3 (V3 Double)
-(m,n) = case commuting3 1 2 2 of
+(m,n) = case commuting3 2 1 1 of
           m:n:_ -> (herm m, herm n)
    where
      herm a = (a + adjoint a) !!* scale

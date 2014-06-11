@@ -1,7 +1,15 @@
 -- | Bunse-Gerstner simultaneous diagonalization
+--
+-- Method due to,
+--
+--       A. Bunse-Gerstner, R. Byers, V. Mehrmann. "Numerical Methods for
+--       Simultaneous Diagonalization." 1993
 
-module BunseGurstner where
--- (simultDiag, offAxisTerminate, Diagonalization(..))
+module BunseGurstner
+  ( simultDiag
+  , offAxisTerminate, offAxisNorm
+  , Diagonalization(..)
+  ) where
 
 import Prelude hiding (sum)
 import Linear
@@ -20,10 +28,6 @@ data Diagonalization f a = Diag { diagA, diagB, diagQ :: !(f (f a)) }
 --     A A^H = A^H A
 --     B B^H = B^H B
 --
--- Method due to,
---
---       A. Bunse-Gerstner, R. Byers, V. Mehrmann. "Numerical Methods for
---       Simultaneous Diagonalization." 1993
 simultDiag :: (Conjugate a, RealFloat a, Show a)
            => M33 a
            -> M33 a
@@ -44,9 +48,10 @@ simultDiag a b = iterate go (Diag (toComplex a) (toComplex b) eye3)
              (adjoint r !*! b !*! r)
              (q !*! r)
       where
-        --(c, s) = rotationAngle a b (i,j)
-        (c, s) = bruteForceAngle 100 100 a b (i,j)
-        r = rotation i j c s
+        (c, s) = rotationAngle a b (i,j)
+        --(c, s) = bruteForceAngle 100 100 a b (i,j)
+        r = traceShow (c, s) $ rotation i j c s
+{-# INLINE simultDiag #-}
 
 -- | Terminate the diagonalization when the off-axis norm has pass
 -- below epsilon
@@ -58,6 +63,7 @@ offAxisTerminate eps = takeWhile f
   where f d = let off = offAxisNorm (diagA d) + offAxisNorm (diagB d)
                   mag = frobeniusNorm (diagA d) + frobeniusNorm (diagB d)
               in off > eps * mag
+{-# INLINE offAxisTerminate #-}
  
 -- | Weight of components off-axis
 offAxisNorm :: (Additive f, Traversable f, Trace f, RealFloat a)
@@ -65,9 +71,10 @@ offAxisNorm :: (Additive f, Traversable f, Trace f, RealFloat a)
 offAxisNorm = frobeniusNorm . offAxis
   where
     offAxis a = a !-! kronecker (diagonal a)
+{-# INLINE offAxisNorm #-}
  
 -- | a rotation in ij plane
-rotation :: (Conjugate a, RealFloat a, Show a)
+rotation :: (Conjugate a, RealFloat a)
          => E V3 -> E V3 -> a -> Complex a -> M33 (Complex a)
 rotation _ _ c s | (>1e-5) $ c^2 + (magnitude s)^2 - 1 =
     error "Invalid rotation"
@@ -77,18 +84,7 @@ rotation (E ei) (E ej) c s =
     - conjugate s        *!! (unit ei `outer` unit ej)
     +           s        *!! (unit ej `outer` unit ei)
     + realToFrac (c - 1) *!! (unit ej `outer` unit ej)
-
--- | Pick a rotation
-rotationAngle :: (Conjugate a, Ord a, RealFloat a)
-              => M33 (Complex a)
-              -> M33 (Complex a)
-              -> (E V3, E V3)
-              -> (a, Complex a)
-rotationAngle a b plane =
-      minimumBy (comparing $ cond a b plane)
-    $ map (\f->f a plane)
-    -- $ [goldstineAngle, eberleinAngle]
-    $ [eberleinAngle]
+{-# INLINE rotation #-}
 
 bruteForceAngle :: (Conjugate a, Ord a, RealFloat a)
                 => Int -> Int
@@ -105,6 +101,7 @@ bruteForceAngle nTheta nPhi a b plane =
     range :: RealFrac a => a -> a -> Int -> [a]
     range a b n = [a + d*realToFrac i | i <- [0..n]]
       where d = (b - a) / realToFrac n
+{-# INLINE bruteForceAngle #-}
     
     
 -- | Looking for minimizer of this
@@ -136,6 +133,19 @@ cond a b (E i, E j) (c, s) =
            (V3 (     aji) (avg       aii        ajj ) (-     aij))
            (V3 (conj bij) (avg (conj bii) (conj bjj)) (-conj bji))
            (V3 (     bji) (avg       bii        bjj ) (-     bij))
+{-# INLINE cond #-}
+
+-- | Pick a rotation
+rotationAngle :: (Conjugate a, Ord a, RealFloat a)
+              => M33 (Complex a)
+              -> M33 (Complex a)
+              -> (E V3, E V3)
+              -> (a, Complex a)
+rotationAngle a b plane =
+      minimumBy (comparing $ cond a b plane)
+    $ map (\f->f a plane)
+    -- $ [goldstineAngle, eberleinAngle]
+    $ [eberleinAngle]
 
 -- | Minimizing rotation angle due to Eberlein, 1962
 eberleinAngle :: (Conjugate a, Ord a, RealFloat a)
@@ -146,7 +156,7 @@ eberleinAngle a (E i, E j) = (c, realToFrac s)
   where
     -- FIXME? real?
     x = atan2 (realPart $ a^.i.j + a^.j.i) (realPart $ a^.i.i - a^.j.j) / 2
-    c = cos x + 1
+    c = cos x
     s = sin x
   
 -- | Minimizing rotation angle due to Goldstine & Horwitz, 1958 (pg. 179)
@@ -161,3 +171,4 @@ goldstineAngle a (E i, E j) = undefined
 
 frobeniusNorm :: (Foldable f, Functor f, RealFloat a) => f (f (Complex a)) -> a
 frobeniusNorm a = sum $ fmap (sum . fmap (\x->(magnitude x)^2)) a
+{-# INLINE frobeniusNorm #-}              

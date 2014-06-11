@@ -27,13 +27,16 @@ main = do
     --print $ eigen3 m
     
     --mapM (putStrLn . showMatrix . (\d->diagQ d !*! diagQ d))
-    mapM (\d->do print $ offAxisNorm $ diagA d
+    mapM (\d->do print "hello"
+                 print $ offAxisNorm $ diagA d
                  putStrLn $ showMatrix $ diagQ d !*! adjoint (diagQ d)
-                 putStrLn $ showMatrix $ adjoint (diagQ d) !*! diagA d !*! diagQ d
-                 putStrLn $ showMatrix $ adjoint (diagQ d) !*! diagB d !*! diagQ d
+                 --putStrLn $ showMatrix $ adjoint (diagQ d) !*! fmap (fmap realToFrac) m !*! diagQ d
+                 --putStrLn $ showMatrix $ diagQ d !*! fmap (fmap realToFrac) m !*! adjoint (diagQ d)
+                 putStrLn $ showMatrix $ diagA d
+                 putStrLn $ showMatrix $ diagB d
          )
       $ take 100 $ drop 00000
-      $ offAxisTerminate 0.1 $ simultDiag n m
+      $ offAxisTerminate 0.01 $ simultDiag n m
 
 showMatrix :: (Functor f, Foldable f, Show a) => f (f a) -> String
 showMatrix a = unlines $ toList $ fmap (foldMap (pad 70 . show)) a

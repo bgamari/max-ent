@@ -4,6 +4,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module MaxEnt where
+-- ( Point(..)
+-- , Model(..)
+-- , mixtureModel
+-- , entropy
+-- , chiSquared
+-- , maxEnt
+-- ) where
 
 import Prelude hiding (sum, any)
 import Data.Foldable as F
@@ -50,16 +57,21 @@ sumM :: (Num a, Foldable f, Applicative v, Additive w, Additive v)
 sumM = F.foldl' (!+!) (pure zero)
 {-# INLINE sumM #-}
 
+l1Normalize :: (Functor f, Foldable f, RealFrac a) => f a -> f a
+l1Normalize x = fmap (/ norm) x
+  where norm = sum x
+{-# INLINE l1Normalize #-}
+
 entropy :: (Foldable f, Metric f, Epsilon a, RealFloat a) => f a -> a
-entropy = getSum . F.foldMap (\p->Sum $ p * log p) . normalize
+entropy = getSum . F.foldMap (\p->Sum $ p * log p) . l1Normalize
 {-# INLINE entropy #-}
 
-gradEntropy :: (Functor f, Metric f, Epsilon a, RealFloat a) => f a -> f a
-gradEntropy = fmap (\p->1 + log p) . normalize
+gradEntropy :: (Foldable f, Functor f, Metric f, Epsilon a, RealFloat a) => f a -> f a
+gradEntropy = fmap (\p->1 + log p) . l1Normalize
 {-# INLINE gradEntropy #-}
 
 hessianEntropy :: (Traversable f, Metric f, Epsilon a, RealFloat a) => f a -> f (f a)
-hessianEntropy = kronecker . fmap recip . normalize
+hessianEntropy = kronecker . fmap recip . l1Normalize
 {-# INLINE hessianEntropy #-}
 
 

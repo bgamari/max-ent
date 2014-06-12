@@ -28,17 +28,18 @@ models = v [ Model $ expModel 100, Model $ expModel 200
            ]
 
 weights :: V 8 Double
-weights = normalize $ v [1,2,1,10, 1,2,8,1]
+weights = l1Normalize $ v [1,2,1,10, 1,2,8,1]
 
 pts = map (\x->Point (V1 x) (mixtureModel models weights (V1 x)) 1) [0..2000]
 
 main = do
     let f :: V 8 Double
-        f = normalize $ v $ concat $ replicate 8 [1]
+        f = l1Normalize $ v $ concat $ replicate 8 [1]
     let hc = hessianChiSquared pts models f
         basis = subspace pts f models
     --print $ gradChiSquared pts models f ^-^ finiteGrad 1e-7 (chiSquared pts models) f
 
+    putStrLn $ unlines $ map (\(Point (V1 x) y s)->show x++"\t"++show y) pts
     print $ maxEnt 1e3 pts models f
 
 

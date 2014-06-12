@@ -1,28 +1,43 @@
-import Prelude hiding (sum)
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
+
+import Prelude hiding (sum, concat)
 import Data.Foldable
 import Data.Traversable
 import Data.Complex
 import Control.Applicative
 import Linear
+import Linear.V (V)
+import qualified Linear.V as LV
+import qualified Data.Vector as V
+import GHC.TypeLits (Nat)
 
 import MaxEnt
 
 expModel :: RealFloat a => a -> V1 a -> a
 expModel tau (V1 t) = exp (-t/tau)
 
-models = V4 (Model $ expModel 100) (Model $ expModel 200)
-            (Model $ expModel 500) (Model $ expModel 700)
+v :: LV.Dim n => [a] -> V (n::Nat) a
+v = maybe (error "Invalid length vector given") id . LV.fromVector . V.fromList
 
-weights :: V4 Double
-weights = normalize $ V4 1 1 1 1
+models :: V 8 (Model V1)
+models = v [ Model $ expModel 100, Model $ expModel 200
+           , Model $ expModel 300, Model $ expModel 400
+           , Model $ expModel 500, Model $ expModel 600
+           , Model $ expModel 700, Model $ expModel 800
+           ]
+
+weights :: V 8 Double
+weights = normalize $ v [1,2,1,10, 1,2,8,1]
+
 pts = map (\x->Point (V1 x) (mixtureModel models weights (V1 x)) 1) [0..2000]
 
 main = do
-    let f = normalize $ V4 2 3 2 3
+    let f :: V 8 Double
+        f = normalize $ v $ concat $ replicate 8 [1]
     let hc = hessianChiSquared pts models f
         basis = subspace pts f models
-    print $ gradChiSquared pts models f ^-^ finiteGrad 1e-7 (chiSquared pts models) f
-    print $ gradChiSquared pts models f
+    --print $ gradChiSquared pts models f ^-^ finiteGrad 1e-7 (chiSquared pts models) f
 
     print $ maxEnt 1e3 pts models f
 

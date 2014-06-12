@@ -21,6 +21,7 @@ import Foreign.Storable
 
 import Debug.Trace
 import Unsafe.Coerce
+import Data.List (intercalate)
 
 data Point x a = Point { pX :: !(x a)
                        , pY, pSigma :: !a
@@ -49,16 +50,16 @@ sumM :: (Num a, Foldable f, Applicative v, Additive w, Additive v)
 sumM = F.foldl' (!+!) (pure zero)
 {-# INLINE sumM #-}
 
-entropy :: (Foldable f, RealFloat a) => f a -> a
-entropy = getSum . F.foldMap (\p->Sum $ p * log p)
+entropy :: (Foldable f, Metric f, Epsilon a, RealFloat a) => f a -> a
+entropy = getSum . F.foldMap (\p->Sum $ p * log p) . normalize
 {-# INLINE entropy #-}
 
-gradEntropy :: (Functor f, RealFloat a) => f a -> f a
-gradEntropy = fmap (\p->1 + log p)
+gradEntropy :: (Functor f, Metric f, Epsilon a, RealFloat a) => f a -> f a
+gradEntropy = fmap (\p->1 + log p) . normalize
 {-# INLINE gradEntropy #-}
 
-hessianEntropy :: (Traversable f, RealFloat a) => f a -> f (f a)
-hessianEntropy = kronecker . fmap recip
+hessianEntropy :: (Traversable f, Metric f, Epsilon a, RealFloat a) => f a -> f (f a)
+hessianEntropy = kronecker . fmap recip . normalize
 {-# INLINE hessianEntropy #-}
 
 
@@ -89,13 +90,19 @@ hessianChiSquared pts models f = 2 *!! sumM (fmap g pts)
 {-# INLINE hessianChiSquared #-}
 
 
-showMatrix :: (Functor f, Foldable f, Foldable g, Show a) => f (g a) -> String
-showMatrix a = unlines $ toList $ fmap (foldMap (pad 70 . show)) a
-  where pad n s = take n $ s ++ repeat ' '
+showMatrix :: (Functor f, Foldable f, Functor g, Foldable g, Show a) => f (g a) -> String
+showMatrix = (++"\n") . bracket . intercalate ",\n" . toList . fmap row
+  where
+    pad n s = take n $ s ++ repeat ' '
+    bracket c = "[ "++c++" ]"
+    row = bracket . intercalate ", " . toList . fmap (pad 30 . show)
+
+tr = Debug.Trace.trace
+trf msg f x = Debug.Trace.trace (show msg++f x) x
 
 -- | Maximum entropy fitting of distribution
 maxEnt :: forall f x a.
-          (Distributive f, Metric f, Traversable f, Applicative f, Show (f (f a)), a ~ Double)
+          (Distributive f, Metric f, Traversable f, Applicative f, Show (f a), Show (f (f a)), a ~ Double)
        => a                     -- ^ target chi-squared
        -> [Point x a]           -- ^ observations
        -> f (Model x)           -- ^ models
@@ -103,42 +110,41 @@ maxEnt :: forall f x a.
        -> [f a]                 -- ^ iterates
 maxEnt cAim pts models f = go f
   where
-    offTol = 1 -- TODO
+    offTol = 0.1 -- fraction of frobenius norm of g that can be off-diagonala
     go :: f a -> [f a]
     go f
       | gDiagOff > offTol = error "g not diagonal"
-      | otherwise = f' : go f'
+      | otherwise = trf "f'" show f' : go f'
       where
         -- determine search subspace
         basis = subspace pts f models  -- <e_i | f_j>
         -- diagonalize m
         m     = basis !*! hessianChiSquared pts models f !*! adjoint basis
-        (p, gamma) = eigen3 m
+        (p, gamma) = trf "eig" show $ eigen3 $ tr ("basis "++showMatrix basis) m
 
         -- verify simultaneous diagonalization of g
         g     = basis !*! kronecker f !*! adjoint basis
         gDiag = p !*! g !*! adjoint p
-        gDiagOff = sum (fmap (sum . fmap (^(2::Int))) gDiag) - norm (diagonal gDiag)
+        gDiagOff = let n = sum $ fmap (sum . fmap (^(2::Int))) gDiag
+                       off = norm (diagonal gDiag)
+                   in off / n
 
         -- eigenvalues of g
-        wG = Debug.Trace.trace (showMatrix basis) $ diagonal gDiag
+        wG = diagonal gDiag
 
         -- orthogonalize g
         -- this is where we pass to the eigenbasis
-        f' = case length $ filter (nearZero . abs) $ toList wG of
+        f' = case length $ filter ((< 1e-3) . abs) $ toList wG of
                -- full rank
-               0 -> let s = fmap (recip . norm) p -- scale to set g to identity
-                        basis' = traceShow ("g", kronecker s !*! gDiag) $ adjoint (kronecker s) !*! basis
-                    in goSubspace f (adjoint basis' !*! p) gamma
+               0 -> let s = fmap recip (diagonal gDiag) -- scale to set g to identity
+                        p' = adjoint (kronecker s) !*! p
+                    in goSubspace f (adjoint basis !*! p') gamma
 
                -- one dependent pair
-               {-
-               1 -> let basis' = fmap (^._xy) $ basis ^. _xy
-                    in goOrtho f (adjoint basis' !*! p)
-                               (fmap (^._xy) $ (^._xy) $ basis !*! m !*! basis)
-                               ((^._xy) $ basis !*! gamma)
-                               (fmap (^._xy) $ p^._xy)
-               -}
+               1 -> let s = fmap recip $ (diagonal gDiag) ^.  _xy
+                        p' = adjoint (kronecker s) !*! fmap (^. _xy) (p ^. _xy)
+                    in goSubspace f (adjoint (basis ^. _xy) !*! p') (gamma ^. _xy)
+
                _ -> error "Too many dependent eigenvectors"
 
     -- | Here we optimize the objective within our orthonormal search subspace
@@ -149,8 +155,8 @@ maxEnt cAim pts models f = go f
                -> f a
     goSubspace f basis gamma = f'
       where
-        -- next iterate
-        f'    = f ^+^ basis !* step alpha
+        -- next iterate (FIXME: revisit non-negative)
+        f'    = fmap (max 1e-8) $ f ^+^ basis !* step alpha
 
         -- limit of l = |df|
         l0    = 0.1 * sum f
@@ -172,7 +178,7 @@ maxEnt cAim pts models f = go f
                      <$> s <*> c <*> gamma
 
         -- search for alpha to satisfy C == Caim
-        alpha = traceShow ("asdf", toDouble c0, cAim') $ findAlpha 1
+        alpha = traceShow ("chi squared = ", toDouble c0, "cAim = ", cAim') $ findAlpha 1
         findAlpha :: RealFloat a => a -> a
         findAlpha alpha
           | l > l0        = alpha
@@ -198,7 +204,7 @@ cmultOp v a = (*^) <$> v <*> a
 {-# INLINE cmultOp #-}
 
 -- | Compute a three-dimensional search subspace
-subspace :: (Applicative f, Traversable f, Metric f, RealFloat a)
+subspace :: (Applicative f, Traversable f, Metric f, RealFloat a, Epsilon a)
          => [Point x a] -> f a -> f (Model x) -> V3 (f a)
 subspace pts f models = V3 e1 e2 e3
   where
@@ -211,6 +217,10 @@ subspace pts f models = V3 e1 e2 e3
     gc = gradChiSquared pts models f
     d grad = recip $ sqrt $ F.sum $ f `cmult` fmap (^2) grad
 {-# INLINE subspace #-}
+
+-- | A vector given in the eigenbasis of an operator of type @f (f a)@
+newtype Eigenspace f a = Eig (f a)
+--eigen3 :: f (f Double) -> (f (Eigenspace f a), f a)
 
 eigen3 :: M33 Double -> (M33 Double, V3 Double)
 eigen3 a =

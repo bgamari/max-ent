@@ -20,6 +20,7 @@ import qualified Numeric.LinearAlgebra.LAPACK as LA
 import Foreign.Storable
 
 import Debug.Trace
+import Unsafe.Coerce
 
 data Point x a = Point { pX :: !(x a)
                        , pY, pSigma :: !a
@@ -33,6 +34,7 @@ data Model x = Model {runModel :: forall a. RealFloat a => x a -> a}
 
 onValue :: RealFloat a => x a -> Model x -> a
 onValue = flip runModel
+{-# INLINE onValue #-}
 
 mixtureModel :: (Foldable f, Applicative f, RealFloat a)
              => f (Model x)   -- ^ models to mix
@@ -40,20 +42,24 @@ mixtureModel :: (Foldable f, Applicative f, RealFloat a)
              -> x a           -- ^ abscissa
              -> a             -- ^ ordinate
 mixtureModel models fs x = sum $ (\f m->f * runModel m x) <$> fs <*> models
+{-# INLINE mixtureModel #-}
 
 sumM :: (Num a, Foldable f, Applicative v, Additive w, Additive v)
      => f (v (w a)) -> v (w a)
 sumM = F.foldl' (!+!) (pure zero)
-
+{-# INLINE sumM #-}
 
 entropy :: (Foldable f, RealFloat a) => f a -> a
 entropy = getSum . F.foldMap (\p->Sum $ p * log p)
+{-# INLINE entropy #-}
 
 gradEntropy :: (Functor f, RealFloat a) => f a -> f a
-gradEntropy = fmap (\x->1 + log x)
+gradEntropy = fmap (\p->1 + log p)
+{-# INLINE gradEntropy #-}
 
 hessianEntropy :: (Traversable f, RealFloat a) => f a -> f (f a)
 hessianEntropy = kronecker . fmap recip
+{-# INLINE hessianEntropy #-}
 
 
 chiSquared :: (Foldable f, Applicative f, RealFloat a)
@@ -64,21 +70,28 @@ chiSquared :: (Foldable f, Applicative f, RealFloat a)
 chiSquared pts models f = getSum $ foldMap g pts
   where
     g (Point x y s) = Sum $ (mixtureModel models f x - y)^2 / s^2
+{-# INLINE chiSquared #-}
 
 gradChiSquared :: (Traversable f, Additive f, Applicative f, RealFloat a)
                => [Point x a] -> f (Model x) -> f a -> f a
-gradChiSquared pts models f = (-2) *^ sumV (fmap g pts)
+gradChiSquared pts models f = 2 *^ sumV (fmap g pts)
   where
-    g (Point x y s) = (mixtureModel models f x + y) / s *^ fmap (onValue x) models
+    g (Point x y s) = (mixtureModel models f x - y) / s *^ fmap (onValue x) models
+{-# INLINE gradChiSquared #-}
 
 hessianChiSquared :: (RealFloat a, Additive f, Applicative f)
                   => [Point x a] -> f (Model x) -> f a -> f (f a)
-hessianChiSquared pts models f = (-2) *!! sumM (fmap g pts)
+hessianChiSquared pts models f = 2 *!! sumM (fmap g pts)
   where
     g (Point x y s) =
       let m = fmap (onValue x) models
       in (m `outer` m) !!* recip s
+{-# INLINE hessianChiSquared #-}
 
+
+showMatrix :: (Functor f, Foldable f, Foldable g, Show a) => f (g a) -> String
+showMatrix a = unlines $ toList $ fmap (foldMap (pad 70 . show)) a
+  where pad n s = take n $ s ++ repeat ' '
 
 -- | Maximum entropy fitting of distribution
 maxEnt :: forall f x a.
@@ -96,26 +109,28 @@ maxEnt cAim pts models f = go f
       | gDiagOff > offTol = error "g not diagonal"
       | otherwise = f' : go f'
       where
-        basis = adjoint $ subspace pts f models  -- <e_i | f_j>
-        m     = adjoint basis !*! hessianChiSquared pts models f !*! basis
-        (p, gamma) = traceShow (hessianChiSquared pts models f) $ eigen3 m
+        -- determine search subspace
+        basis = subspace pts f models  -- <e_i | f_j>
+        -- diagonalize m
+        m     = basis !*! hessianChiSquared pts models f !*! adjoint basis
+        (p, gamma) = eigen3 m
 
-        -- verify simultaneous diagonalization
-        g     = adjoint basis !*! kronecker f !*! basis
-        gDiag = adjoint p !*! g !*! p
-        gDiagOff = sum $ fmap (fmap (^(2::Int)))
-                   $ gDiag !*! (eye3 !-! kronecker (pure 1))
+        -- verify simultaneous diagonalization of g
+        g     = basis !*! kronecker f !*! adjoint basis
+        gDiag = p !*! g !*! adjoint p
+        gDiagOff = sum (fmap (sum . fmap (^(2::Int))) gDiag) - norm (diagonal gDiag)
 
         -- eigenvalues of g
-        wG = diagonal gDiag
+        wG = Debug.Trace.trace (showMatrix basis) $ diagonal gDiag
+
         -- orthogonalize g
         -- this is where we pass to the eigenbasis
         f' = case length $ filter (nearZero . abs) $ toList wG of
                -- full rank
-               0 -> let s = kronecker $ fmap norm p -- scale
-                        basis' = basis !*! s
-                        p' = adjoint s !*! p !*! s -- ought to be identity
-                    in goOrtho f (adjoint $ basis' !*! p) gamma p'
+               0 -> let s = fmap (recip . norm) p -- scale to set g to identity
+                        basis' = traceShow ("g", kronecker s !*! gDiag) $ adjoint (kronecker s) !*! basis
+                    in goSubspace f (adjoint basis' !*! p) gamma
+
                -- one dependent pair
                {-
                1 -> let basis' = fmap (^._xy) $ basis ^. _xy
@@ -126,39 +141,25 @@ maxEnt cAim pts models f = go f
                -}
                _ -> error "Too many dependent eigenvectors"
 
-    -- | This works in the eigenbasis of M and g
-    goOrtho :: forall g. (Traversable g, Metric g, Applicative g, Functor g)
-            => f a           -- ^ current iterate
-            -> g (f a)       -- ^ subspace basis (unnormalized), <p_i | f_j>
-            -> g a           -- ^ gamma, eigenvalues of M, the hessian of chi-squared
-            -> g (g a)       -- ^ P, eigenvectors of M and g (as they are compatible)
-            -> f a
-    goOrtho f basis gamma p = f'
-      where
-        -- normalize
-        scale = kronecker $ fmap (recip . norm) p
-        -- optimize
-        f'    = goSubspace f basis gamma
-
-    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Functor g)
+    -- | Here we optimize the objective within our orthonormal search subspace
+    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g)
                => f a        -- ^ current iterate
-               -> g (f a)    -- ^ subspace basis
+               -> f (g a)    -- ^ subspace basis
                -> g a        -- ^ gamma, eigenvalues of M
                -> f a
     goSubspace f basis gamma = f'
       where
         -- next iterate
-        f'    = traceShow alpha
-                $ f ^+^ step alpha *! basis
+        f'    = f ^+^ basis !* step alpha
 
         -- limit of l = |df|
         l0    = 0.1 * sum f
 
         -- various useful quantities
         s0    = entropy f
-        s     = basis !* gradEntropy f
+        s     = adjoint basis !* gradEntropy f
         c0    = chiSquared pts models f
-        c     = basis !* gradChiSquared pts models f
+        c     = adjoint basis !* gradChiSquared pts models f
 
         -- quadratic model of C
         cQ :: g a -> a
@@ -171,25 +172,30 @@ maxEnt cAim pts models f = go f
                      <$> s <*> c <*> gamma
 
         -- search for alpha to satisfy C == Caim
-        alpha = findAlpha 1
+        alpha = traceShow ("asdf", toDouble c0, cAim') $ findAlpha 1
         findAlpha :: RealFloat a => a -> a
         findAlpha alpha
           | l > l0        = alpha
           | converged     = alpha
-          | cV < cAim'    = findAlpha (1.1 * alpha)
-          | otherwise     = findAlpha (0.9 * alpha)
+          | cV < cAim'    = findAlpha (1.01 * alpha)
+          | otherwise     = findAlpha (0.99* alpha)
           where
             x = step alpha
             l = norm x
             cV = cQ x
-            converged = nearZero $ abs (cV - cAim') / cAim'
+            converged = (<1e-5) $ abs (cV - cAim') / cAim'
+{-# INLINE maxEnt #-}
+
+toDouble = unsafeCoerce :: a -> Double
 
 -- | Component-wise multiplication
 cmult :: (Num a, Applicative f) => f a -> f a -> f a
 cmult a b = (*) <$> a <*> b
+{-# INLINE cmult #-}
 
 cmultOp :: (Num a, Applicative f) => f a -> f (f a) -> f (f a)
 cmultOp v a = (*^) <$> v <*> a
+{-# INLINE cmultOp #-}
 
 -- | Compute a three-dimensional search subspace
 subspace :: (Applicative f, Traversable f, Metric f, RealFloat a)
@@ -204,20 +210,26 @@ subspace pts f models = V3 e1 e2 e3
     gs = gradEntropy f
     gc = gradChiSquared pts models f
     d grad = recip $ sqrt $ F.sum $ f `cmult` fmap (^2) grad
+{-# INLINE subspace #-}
 
 eigen3 :: M33 Double -> (M33 Double, V3 Double)
 eigen3 a =
   let (lambd, p) = LA.eigS $ m33ToHMat a
   in (hmatToM33 p, hvecToV3 lambd)
+{-# INLINE eigen3 #-}
 
 m33ToHMat :: HM.Element a => M33 a -> HM.Matrix a
 m33ToHMat = HM.fromLists . toList . fmap toList
+{-# INLINE m33ToHMat #-}
 
 hmatToM33 :: HM.Element a => HM.Matrix a -> M33 a
 hmatToM33 = listToV3 . map listToV3 . HM.toLists
+{-# INLINE hmatToM33 #-}
 
 listToV3 :: [a] -> V3 a
 listToV3 [x,y,z] = V3 x y z
+{-# INLINE listToV3 #-}
 
 hvecToV3 :: Storable a => HV.Vector a -> V3 a
 hvecToV3 = listToV3 . HV.toList
+{-# INLINE hvecToV3 #-}

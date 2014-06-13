@@ -87,9 +87,9 @@ chiSquared :: (Foldable f, Applicative f, RealFloat a)
            -> f (Model x)     -- ^ models
            -> f a             -- ^ weights
            -> a
-chiSquared pts models f = getSum $ foldMap g pts
+chiSquared pts models f = sum $ fmap g pts
   where
-    g (Point x y s) = Sum $ (mixtureModel models f x - y)^2 / s^2
+    g (Point x y s) = (mixtureModel models f x - y)^2 / s^2
 {-# INLINE chiSquared #-}
 
 gradChiSquared :: (Traversable f, Additive f, Applicative f, RealFloat a)
@@ -139,7 +139,7 @@ maxEnt cAim pts models f = go f
     go :: f a -> [f a]
     go f
       | gDiagOff > offTol = error "g not diagonal"
-      | otherwise = traceShow ("g", gDiagOff, showMatrix gDiag) f' : go f'
+      | otherwise = trm "g" (showMatrix g) $ trm "basis" (showMatrix basis) $ f' : go f'
       where
         -- determine search subspace
         basis = subspace pts f models  -- <e_i | f_j>
@@ -159,32 +159,39 @@ maxEnt cAim pts models f = go f
 
         -- orthogonalize g
         -- this is where we pass to the eigenbasis
-        f' = case length $ filter ((< 1e-3) . abs) $ toList wG of
+        df = case length $ filter ((< 1e-3) . abs) $ toList wG of
                -- full rank
-               0 -> let s = fmap recip (diagonal gDiag) -- scale to set g to identity
-                        p' = adjoint (kronecker s) !*! p
-                    in goSubspace f (adjoint basis !*! p') gamma
+               0 -> let s = fmap sqrt wG -- scale to set g to identity
+                        --p' = kronecker (fmap recip s) !*! p
+                        p' = p
+                        x = goSubspace f (adjoint basis !*! p') gamma
+                    in adjoint basis !* x
 
                -- one dependent pair
-               1 -> let s = fmap recip $ (diagonal gDiag) ^.  _xy
-                        p' = adjoint (kronecker s) !*! fmap (^. _xy) (p ^. _xy)
-                    in goSubspace f (adjoint (basis ^. _xy) !*! p') (gamma ^. _xy)
+               1 -> let s = fmap sqrt $ wG ^.  _xy
+                        --p' = kronecker (fmap recip s) !*! 
+                        p' = fmap (^. _xy) (p ^. _xy)
+                        basis' = basis ^.  _xy
+                        x = goSubspace f (adjoint basis' !*! p')
+                            (gamma ^. _xy)
+                    in adjoint basis' !* x
 
                _ -> error "Too many dependent eigenvectors"
+
+        -- next iterate (FIXME: revisit non-negative)
+        f'    = fmap (max 1e-8) $ f ^+^ df
 
     -- | Here we optimize the objective within our orthonormal search subspace
     goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g, Show (g a))
                => f a        -- ^ current iterate
                -> f (g a)    -- ^ subspace basis
                -> g a        -- ^ gamma, eigenvalues of M
-               -> f a
-    goSubspace f basis gamma = f'
+               -> g a
+    goSubspace f basis gamma = x
       where
-        -- next iterate (FIXME: revisit non-negative)
-        f'    = fmap (max 1e-8) $ f ^+^ basis !* x
-
         -- limit of l = |df|
-        l0    = sqrt $ 0.1 * sum f
+        --l0    = sqrt $ 0.1 * sum f
+        l0    = sqrt $ 0.1 * sum (adjoint basis !* f)
 
         -- various useful quantities
         s     = adjoint basis !* gradEntropy f
@@ -194,7 +201,7 @@ maxEnt cAim pts models f = go f
         -- @cP p x@ is a quadratic model of C at point x with distance penalty p
         cP :: a -> g a -> a
         cP p x = c0 + c `dot` x + sum ((\x g -> (p+g)*x*x) <$> x <*> gamma) / 2
-        cMin = c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 3
+        cMin = c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 2
         cAim'  = traceShow ("cMin = ", cMin) $ max cAim cMin
 
         -- step with Lagrange multipliers alpha and p
@@ -239,7 +246,7 @@ maxEnt cAim pts models f = go f
               aChopDone = cAim' <= cq && cq <= cp && cp <= c0
               pChopDone = p == 0
           a <- use chopAlpha
-          traceShow (a, p, cAim', cq, cp, c0, c `dot` x) $ return ()
+          traceShow (a, p, norm x, cAim', cq, cp, c0, c `dot` x) $ return ()
           case () of
             _ | not aChopDone -> alphaChop
               | not success   -> increaseP >> alphaChop

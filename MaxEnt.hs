@@ -30,7 +30,8 @@ import qualified Numeric.LinearAlgebra.LAPACK as LA
 import Foreign.Storable
 
 data Point x a = Point { pX :: !(x a)
-                       , pY, pSigma :: !a
+                       , pY :: !a     -- ^ y
+                       , pSigma :: !a -- ^ Variance
                        }
 
 instance Functor x => Functor (Point x) where
@@ -85,7 +86,7 @@ chiSquared :: (Foldable f, Applicative f, RealFloat a)
            -> a
 chiSquared pts models f = sum $ fmap g pts
   where
-    g (Point x y s) = (mixtureModel models f x - y)^2 / s^2
+    g (Point x y s) = (mixtureModel models f x - y)^2 / s
 {-# INLINE chiSquared #-}
 
 gradChiSquared :: (Traversable f, Additive f, Applicative f, RealFloat a)

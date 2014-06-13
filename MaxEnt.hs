@@ -64,17 +64,17 @@ l1Normalize x = fmap (/ norm) x
 
 entropy :: (Foldable f, Metric f, Epsilon a, RealFloat a)
         => f a -> a
-entropy = getSum . F.foldMap (\p->Sum $ p * log p) . l1Normalize
+entropy = negate . getSum . F.foldMap (\p->Sum $ p * log p) . l1Normalize
 {-# INLINE entropy #-}
 
 gradEntropy :: (Foldable f, Functor f, Metric f, Epsilon a, RealFloat a)
             => f a -> f a
-gradEntropy = fmap (\p->1 + log p) . l1Normalize
+gradEntropy = fmap (\p-> -(1 + log p)) . l1Normalize
 {-# INLINE gradEntropy #-}
 
 hessianEntropy :: (Traversable f, Metric f, Epsilon a, RealFloat a)
                => f a -> f (f a)
-hessianEntropy = kronecker . fmap recip . l1Normalize
+hessianEntropy = kronecker . fmap (negate . recip) . l1Normalize
 {-# INLINE hessianEntropy #-}
 
 

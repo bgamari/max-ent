@@ -37,10 +37,12 @@ main = do
         f = l1Normalize $ v $ concat $ replicate 8 [1]
     let hc = hessianChiSquared pts models f
         basis = subspace pts f models
-    --print $ gradChiSquared pts models f ^-^ finiteGrad 1e-7 (chiSquared pts models) f
 
-    putStrLn $ unlines $ map (\(Point (V1 x) y s)->show x++"\t"++show y) pts
-    print $ maxEnt 1e3 pts models f
+    --print $ gradChiSquared pts models f ^-^ finiteGrad 1e-7 (chiSquared pts models) f
+    --putStrLn $ unlines $ map (\(Point (V1 x) y s)->show x++"\t"++show y) pts
+
+    print $ takeWhile (\f->test pts models f > 0.1)
+          $ maxEnt 1 pts models f
 
 
 finiteGrad :: (Traversable f, Applicative f, Additive f, RealFrac a, Epsilon a)

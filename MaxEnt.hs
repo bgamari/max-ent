@@ -2,6 +2,7 @@
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module MaxEnt where
 -- ( Point(..)
@@ -10,15 +11,17 @@ module MaxEnt where
 -- , entropy
 -- , chiSquared
 -- , maxEnt
+-- , test
 -- ) where
 
-import Prelude hiding (sum, any)
+import Prelude hiding (sum, any, minimum)
 import Data.Foldable as F
 import Data.Traversable as T
 import Data.Distributive
 import Data.Monoid
 import Control.Applicative
 import Control.Lens
+import Control.Monad.State.Strict
 import Linear
 
 import qualified Data.Packed.Matrix as HM
@@ -57,20 +60,24 @@ sumM :: (Num a, Foldable f, Applicative v, Additive w, Additive v)
 sumM = F.foldl' (!+!) (pure zero)
 {-# INLINE sumM #-}
 
-l1Normalize :: (Functor f, Foldable f, RealFrac a) => f a -> f a
+l1Normalize :: (Functor f, Foldable f, RealFrac a)
+            => f a -> f a
 l1Normalize x = fmap (/ norm) x
   where norm = sum x
 {-# INLINE l1Normalize #-}
 
-entropy :: (Foldable f, Metric f, Epsilon a, RealFloat a) => f a -> a
+entropy :: (Foldable f, Metric f, Epsilon a, RealFloat a)
+        => f a -> a
 entropy = getSum . F.foldMap (\p->Sum $ p * log p) . l1Normalize
 {-# INLINE entropy #-}
 
-gradEntropy :: (Foldable f, Functor f, Metric f, Epsilon a, RealFloat a) => f a -> f a
+gradEntropy :: (Foldable f, Functor f, Metric f, Epsilon a, RealFloat a)
+            => f a -> f a
 gradEntropy = fmap (\p->1 + log p) . l1Normalize
 {-# INLINE gradEntropy #-}
 
-hessianEntropy :: (Traversable f, Metric f, Epsilon a, RealFloat a) => f a -> f (f a)
+hessianEntropy :: (Traversable f, Metric f, Epsilon a, RealFloat a)
+               => f a -> f (f a)
 hessianEntropy = kronecker . fmap recip . l1Normalize
 {-# INLINE hessianEntropy #-}
 
@@ -110,7 +117,13 @@ showMatrix = (++"\n") . bracket . intercalate ",\n" . toList . fmap row
     row = bracket . intercalate ", " . toList . fmap (pad 30 . show)
 
 tr = Debug.Trace.trace
+trm msg = tr msg . tr
 trf msg f x = Debug.Trace.trace (show msg++f x) x
+
+data ChopState g a = Chop { _chopAlpha, _chopP :: a
+                          , _chopLastX :: g a }
+
+makeLenses ''ChopState
 
 -- | Maximum entropy fitting of distribution
 maxEnt :: forall f x a.
@@ -122,24 +135,24 @@ maxEnt :: forall f x a.
        -> [f a]                 -- ^ iterates
 maxEnt cAim pts models f = go f
   where
-    offTol = 0.1 -- fraction of frobenius norm of g that can be off-diagonala
+    offTol = 1e-2 -- fraction of frobenius norm of g that can be off-diagonal
     go :: f a -> [f a]
     go f
       | gDiagOff > offTol = error "g not diagonal"
-      | otherwise = trf "f'" show f' : go f'
+      | otherwise = traceShow ("g", gDiagOff, showMatrix gDiag) f' : go f'
       where
         -- determine search subspace
         basis = subspace pts f models  -- <e_i | f_j>
         -- diagonalize m
         m     = basis !*! hessianChiSquared pts models f !*! adjoint basis
-        (p, gamma) = trf "eig" show $ eigen3 $ tr ("basis "++showMatrix basis) m
+        (p, gamma) = trf "eig" show $ eigen3 m
 
         -- verify simultaneous diagonalization of g
         g     = basis !*! kronecker f !*! adjoint basis
-        gDiag = p !*! g !*! adjoint p
-        gDiagOff = let n = sum $ fmap (sum . fmap (^(2::Int))) gDiag
-                       off = norm (diagonal gDiag)
-                   in off / n
+        gDiag = adjoint p !*! g !*! p
+        gDiagOff = let all = sum $ fmap (sum . fmap (^(2::Int))) gDiag
+                       diag = quadrance (diagonal gDiag)
+                   in 1 - diag / all
 
         -- eigenvalues of g
         wG = diagonal gDiag
@@ -160,7 +173,7 @@ maxEnt cAim pts models f = go f
                _ -> error "Too many dependent eigenvectors"
 
     -- | Here we optimize the objective within our orthonormal search subspace
-    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g)
+    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g, Show (g a))
                => f a        -- ^ current iterate
                -> f (g a)    -- ^ subspace basis
                -> g a        -- ^ gamma, eigenvalues of M
@@ -168,43 +181,82 @@ maxEnt cAim pts models f = go f
     goSubspace f basis gamma = f'
       where
         -- next iterate (FIXME: revisit non-negative)
-        f'    = fmap (max 1e-8) $ f ^+^ basis !* step alpha
+        f'    = fmap (max 1e-8) $ f ^+^ basis !* x
 
         -- limit of l = |df|
-        l0    = 0.1 * sum f
+        l0    = sqrt $ 0.1 * sum f
 
         -- various useful quantities
-        s0    = entropy f
         s     = adjoint basis !* gradEntropy f
         c0    = chiSquared pts models f
         c     = adjoint basis !* gradChiSquared pts models f
 
-        -- quadratic model of C
-        cQ :: g a -> a
-        cQ x  = c0 + c `dot` x + sum ((\x g -> g*x*x) <$> x <*> gamma) / 2
-        cAim' = max cAim $ c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 3
+        -- @cP p x@ is a quadratic model of C at point x with distance penalty p
+        cP :: a -> g a -> a
+        cP p x = c0 + c `dot` x + sum ((\x g -> (p+g)*x*x) <$> x <*> gamma) / 2
+        cMin = c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 3
+        cAim'  = traceShow ("cMin = ", cMin) $ max cAim cMin
 
-        -- step with Lagrange multiplier alpha
-        step :: a -> g a
-        step alpha = (\s c g->(alpha * s - c) / (g + alpha))
-                     <$> s <*> c <*> gamma
+        -- step with Lagrange multipliers alpha and p
+        step :: a -> a -> g a
+        step p alpha = (\s c g->(alpha * s - c) / (g + alpha + p))
+                       <$> s <*> c <*> gamma
 
         -- search for alpha to satisfy C == Caim
-        alpha = traceShow ("chi squared = ", toDouble c0, "cAim = ", cAim') $ findAlpha 1
-        findAlpha :: RealFloat a => a -> a
-        findAlpha alpha
-          | l > l0        = alpha
-          | converged     = alpha
-          | cV < cAim'    = findAlpha (1.01 * alpha)
-          | otherwise     = findAlpha (0.99* alpha)
+        alphaMin = case minimum gamma of
+                     x | x < 0  -> -x
+                     _          -> 0
+        alpha0 = alphaMin + 1
+        x = evalState alphaChop $ Chop { _chopLastX = step 0 alpha0
+                                       , _chopP     = 0
+                                       , _chopAlpha = max alpha0 alphaMin
+                                       }
+
+        alphaChop :: RealFloat a => State (ChopState g a) (g a)
+        alphaChop = do
+          p <- use chopP
+          x <- uses chopAlpha $ step p
+          let cq = cP 0 x
+              cp = cP p x
+          case () of
+            _ | cp > c0       -> tr "cp>c0" $ chopDown False
+              | cq < cAim'    -> tr "c<cAim" $ chopUp False
+              | norm x > l0   -> tr "too long" $ chopUp False
+              | otherwise     -> do chopLastX .= x
+                                    chopDown True
           where
-            x = step alpha
-            l = norm x
-            cV = cQ x
-            converged = (<1e-5) $ abs (cV - cAim') / cAim'
+            chopDown success = chopAlpha *= 0.93 >> pChop success
+            chopUp   success = chopAlpha *= 1.03 >> pChop success
+
+        pChop :: RealFloat a
+              => Bool -- ^ alpha chop successful?
+              -> State (ChopState g a) (g a)
+        pChop success = do
+          p <- use chopP
+          x <- uses chopAlpha $ step p
+          let cq  = cP 0 x
+              cp = cP p x
+              aChopDone = cAim' <= cq && cq <= cp && cp <= c0
+              pChopDone = p == 0
+          a <- use chopAlpha
+          traceShow (a, p, cAim', cq, cp, c0, c `dot` x) $ return ()
+          case () of
+            _ | not aChopDone -> alphaChop
+              | not success   -> increaseP >> alphaChop
+              -- | not pChopDone -> decreaseP >> alphaChop
+              | otherwise     -> use chopLastX
+          where
+            increaseP = chopP += 0.1 >> chopAlpha .= alpha0
+            --decreaseP = chopP -= 0.1 >> chopAlpha .= alpha0
 {-# INLINE maxEnt #-}
 
-toDouble = unsafeCoerce :: a -> Double
+test :: (Traversable f, Additive f, Applicative f, Metric f, Epsilon a, RealFloat a)
+     => [Point x a] -> f (Model x) -> f a -> a
+test pts models f = quadrance (gradS ^/ norm gradS ^-^ gradC ^/ norm gradC) / 2
+  where
+    gradS = gradEntropy f
+    gradC = gradChiSquared pts models f
+{-# INLINE test #-}
 
 -- | Component-wise multiplication
 cmult :: (Num a, Applicative f) => f a -> f a -> f a

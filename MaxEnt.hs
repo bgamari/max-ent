@@ -29,10 +29,6 @@ import qualified Data.Packed.Vector as HV
 import qualified Numeric.LinearAlgebra.LAPACK as LA
 import Foreign.Storable
 
-import Debug.Trace
-import Unsafe.Coerce
-import Data.List (intercalate)
-
 data Point x a = Point { pX :: !(x a)
                        , pY, pSigma :: !a
                        }
@@ -108,18 +104,6 @@ hessianChiSquared pts models f = 2 *!! sumM (fmap g pts)
       in (m `outer` m) !!* recip s
 {-# INLINE hessianChiSquared #-}
 
-
-showMatrix :: (Functor f, Foldable f, Functor g, Foldable g, Show a) => f (g a) -> String
-showMatrix = (++"\n") . bracket . intercalate ",\n" . toList . fmap row
-  where
-    pad n s = take n $ s ++ repeat ' '
-    bracket c = "[ "++c++" ]"
-    row = bracket . intercalate ", " . toList . fmap (pad 30 . show)
-
-tr = Debug.Trace.trace
-trm msg = tr msg . tr
-trf msg f x = Debug.Trace.trace (show msg++f x) x
-
 data ChopState g a = Chop { _chopAlpha, _chopP :: a
                           , _chopLastX :: g a }
 
@@ -127,7 +111,7 @@ makeLenses ''ChopState
 
 -- | Maximum entropy fitting of distribution
 maxEnt :: forall f x a.
-          (Distributive f, Metric f, Traversable f, Applicative f, Show (f a), Show (f (f a)), a ~ Double)
+          (Distributive f, Metric f, Traversable f, Applicative f, a ~ Double)
        => a                     -- ^ target chi-squared
        -> [Point x a]           -- ^ observations
        -> f (Model x)           -- ^ models
@@ -139,13 +123,13 @@ maxEnt cAim pts models f = go f
     go :: f a -> [f a]
     go f
       | gDiagOff > offTol = error "g not diagonal"
-      | otherwise = trm "g" (showMatrix g) $ trm "basis" (showMatrix basis) $ f' : go f'
+      | otherwise = f' : go f'
       where
         -- determine search subspace
         basis = subspace pts f models  -- <e_i | f_j>
         -- diagonalize m
         m     = basis !*! hessianChiSquared pts models f !*! adjoint basis
-        (p, gamma) = trf "eig" show $ eigen3 m
+        (p, gamma) = eigen3 m
 
         -- verify simultaneous diagonalization of g
         g     = basis !*! kronecker f !*! adjoint basis
@@ -182,7 +166,7 @@ maxEnt cAim pts models f = go f
         f'    = fmap (max 1e-8) $ f ^+^ df
 
     -- | Here we optimize the objective within our orthonormal search subspace
-    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g, Show (g a))
+    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g)
                => f a        -- ^ current iterate
                -> f (g a)    -- ^ subspace basis
                -> g a        -- ^ gamma, eigenvalues of M
@@ -202,7 +186,7 @@ maxEnt cAim pts models f = go f
         cP :: a -> g a -> a
         cP p x = c0 + c `dot` x + sum ((\x g -> (p+g)*x*x) <$> x <*> gamma) / 2
         cMin = c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 2
-        cAim'  = traceShow ("cMin = ", cMin) $ max cAim cMin
+        cAim'  = max cAim cMin
 
         -- step with Lagrange multipliers alpha and p
         step :: a -> a -> g a
@@ -226,9 +210,9 @@ maxEnt cAim pts models f = go f
           let cq = cP 0 x
               cp = cP p x
           case () of
-            _ | cp > c0       -> tr "cp>c0" $ chopDown False
-              | cq < cAim'    -> tr "c<cAim" $ chopUp False
-              | norm x > l0   -> tr "too long" $ chopUp False
+            _ | cp > c0       -> chopDown False
+              | cq < cAim'    -> chopUp False
+              | norm x > l0   -> chopUp False
               | otherwise     -> do chopLastX .= x
                                     chopDown True
           where
@@ -246,7 +230,6 @@ maxEnt cAim pts models f = go f
               aChopDone = cAim' <= cq && cq <= cp && cp <= c0
               pChopDone = p == 0
           a <- use chopAlpha
-          traceShow (a, p, norm x, cAim', cq, cp, c0, c `dot` x) $ return ()
           case () of
             _ | not aChopDone -> alphaChop
               | not success   -> increaseP >> alphaChop

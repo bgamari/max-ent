@@ -257,6 +257,7 @@ maxEnt cAim pts models f = go f
             --decreaseP = chopP -= 0.1 >> chopAlpha .= alpha0
 {-# INLINE maxEnt #-}
 
+-- | The test metric proposed by Bryan and Skilling
 test :: (Traversable f, Additive f, Applicative f, Metric f, Epsilon a, RealFloat a)
      => [Point x a] -> f (Model x) -> f a -> a
 test pts models f = quadrance (gradS ^/ norm gradS ^-^ gradC ^/ norm gradC) / 2

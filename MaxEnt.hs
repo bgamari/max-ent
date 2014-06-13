@@ -133,7 +133,7 @@ maxEnt cAim pts models f = go f
         (p, gamma) = eigen3 m
 
         -- verify simultaneous diagonalization of g
-        g     = basis !*! kronecker f !*! adjoint basis
+        g     = fmap (\v->fmap (dot v) basis) basis
         gDiag = adjoint p !*! g !*! p
         gDiagOff = let all = sum $ fmap (sum . fmap (^(2::Int))) gDiag
                        diag = quadrance (diagonal gDiag)

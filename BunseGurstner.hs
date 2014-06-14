@@ -118,7 +118,6 @@ linSpace a b n = [a + d*realToFrac i | i <- [0..n]]
 {-# INLINE linSpace #-}
    
 trf :: String -> (a -> String) -> a -> a
-
 trf msg f x = Debug.Trace.trace (msg++f x) x
 asT = unsafeCoerce :: a -> (Double, Double)
 

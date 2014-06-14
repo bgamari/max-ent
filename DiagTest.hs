@@ -59,7 +59,7 @@ u = axisAngle (V3 0 1 0) (35*pi/180)
 vs = fromQuaternion u !*! eye3
 
 n,m :: M33 Double
-m = vs !*! kronecker (V3 8 6 1) !*! adjoint vs
+m = vs !*! kronecker (V3 80 6 1) !*! adjoint vs
 n = vs !*! kronecker (V3 7 2 3) !*! adjoint vs
 
 preconditions a b = 

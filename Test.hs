@@ -46,12 +46,13 @@ pts = samplePts 2000
 linSpace :: RealFrac a => a -> a -> Int -> [a]
 linSpace a b n = [a + (b-a)/realToFrac n*realToFrac i | i <- [0..n]]
 
+uniform :: RealFloat a => Models a
+uniform = l1Normalize $ pure 1
+
 main = do
-    let f :: RealFloat a => Models a
-        f = l1Normalize $ pure 1
-
-    --putStrLn $ unlines $ map (\(Point (V1 x) y s)->show x++"\t"++show y) pts
-
+    let f = uniform
+    writeFile "points.txt" $ unlines
+      $ map (\(Point (V1 x) y s)->show x++"\t"++show y++"\t"++show s) pts
     print $ takeWhile (\f->test pts models f > 0.1)
           $ maxEnt 1 pts models f
 
@@ -64,7 +65,22 @@ testGrad = do
               hand = gradChiSquared pts models f
               ad = grad (chiSquared (fmap (fmap realToFrac) pts) models) f
               put msg a = putStrLn $ msg++"\t"++show a
-          in do put "fin-hand" $ norm (fin ^-^ hand) / norm fin
-                put "fin-ad"   $ norm (fin ^-^ ad) / norm fin
-                put "ad-hand"  $ norm (hand ^-^ ad) / norm fin
+              relErr a b = norm (a ^-^ b) / norm b
+          in do put "fin-hand" $ relErr fin hand
+                put "fin-ad"   $ relErr fin ad
+                put "ad-hand"  $ relErr ad hand
     Data.Foldable.mapM_ gradError [2, 10, 20, 50, 100, 200, 400, 800, 2000, 4000, 8000]
+
+testHessian = do
+    let f :: RealFloat a => Models a
+        f = l1Normalize $ pure 1
+    let gradError n = 
+          let pts = samplePts n
+              hand = hessianChiSquared pts models f
+              ad = hessian (chiSquared (fmap (fmap realToFrac) pts) models) f
+              put msg a = putStrLn $ msg++"\t"++show a
+              frobenius = sum . fmap (sum . (^2))
+              relErr a b = frobenius (a !-! b) / frobenius b
+          in put "ad-hand"  $ relErr ad hand
+    Data.Foldable.mapM_ gradError [2, 10, 20, 50, 100, 200, 400, 800, 2000, 4000, 8000]
+    

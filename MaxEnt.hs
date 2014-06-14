@@ -23,11 +23,18 @@ import Control.Applicative
 import Control.Lens
 import Control.Monad.State.Strict
 import Linear
+import Data.Complex
 
 import qualified Data.Packed.Matrix as HM
 import qualified Data.Packed.Vector as HV
 import qualified Numeric.LinearAlgebra.LAPACK as LA
 import Foreign.Storable
+
+import BunseGurstner
+
+import Debug.Trace
+import Unsafe.Coerce
+import Data.List (intercalate)
 
 data Point x a = Point { pX :: !(x a)
                        , pY :: !a     -- ^ y
@@ -105,6 +112,19 @@ hessianChiSquared pts models f = 2 *!! sumM (fmap g pts)
       in (m `outer` m) !!* recip s
 {-# INLINE hessianChiSquared #-}
 
+bracket c = "[ "++c++" ]"
+showVec :: (Functor f, Foldable f, Show a) => f a -> String
+showVec = bracket . intercalate ", " . toList . fmap (pad 30 . show)
+  where
+    pad n s = take n $ s ++ repeat ' '
+
+showMatrix :: (Functor f, Foldable f, Functor g, Foldable g, Show a) => f (g a) -> String
+showMatrix = (++"\n") . bracket . intercalate ",\n" . toList . fmap showVec
+
+tr = Debug.Trace.trace
+trm msg = tr msg . tr
+trf msg f x = Debug.Trace.trace (show msg++f x) x
+
 data ChopState g a = Chop { _chopAlpha, _chopP :: a
                           , _chopLastX :: g a }
 
@@ -112,7 +132,7 @@ makeLenses ''ChopState
 
 -- | Maximum entropy fitting of distribution
 maxEnt :: forall f x a.
-          (Distributive f, Metric f, Traversable f, Applicative f, a ~ Double)
+          (Distributive f, Metric f, Traversable f, Applicative f, Show (f a), Show (f (f a)), a ~ Double)
        => a                     -- ^ target chi-squared
        -> [Point x a]           -- ^ observations
        -> f (Model x)           -- ^ models
@@ -120,54 +140,70 @@ maxEnt :: forall f x a.
        -> [f a]                 -- ^ iterates
 maxEnt cAim pts models f = go f
   where
-    offTol = 1e-2 -- fraction of frobenius norm of g that can be off-diagonal
+    offTol = 1e-6 -- fraction of frobenius norm of g that can be off-diagonal
     go :: f a -> [f a]
     go f
-      | gDiagOff > offTol = error "g not diagonal"
-      | otherwise = f' : go f'
+      | mDiagOff > offTol = error "m not diagonal"
+      | otherwise = trm "f" (showVec f)
+                  $ trm "g" (showMatrix g)
+                  $ trm "m" (showMatrix m)
+                  $ trm "mDiag" (showMatrix mDiag)
+                  $ trm "ddC" (showMatrix $ hessianChiSquared pts models f)
+                  $ trm "wG" (showVec wG)
+                  $ trm "basis" (showMatrix basis)
+                  $ trm "p" (showMatrix p)
+                  $ f' : go f'
       where
-        -- determine search subspace
+        -- determine normalized search subspace
         basis = subspace pts f models  -- <e_i | f_j>
-        -- diagonalize m
-        m     = basis !*! hessianChiSquared pts models f !*! adjoint basis
-        (p, gamma) = eigen3 m
 
-        -- verify simultaneous diagonalization of g
-        g     = fmap (\v->fmap (dot v) basis) basis
-        gDiag = adjoint p !*! g !*! p
-        gDiagOff = let all = sum $ fmap (sum . fmap (^(2::Int))) gDiag
-                       diag = quadrance (diagonal gDiag)
+        -- diagonalize g
+        g       = fmap (\v->fmap (dot v) basis) basis
+        m       = basis !*! hessianChiSquared pts models f !*! adjoint basis
+        (p, wG) = eigen3 g
+
+        -- simultaneous diagonalization
+        --Diag mDiagC gDiagC pC = last $ offAxisTerminate 1e-5 $ map (\x->traceShow (diagQ x) x) $ simultDiag g m
+        --gDiag = fmap (fmap realPart) gDiagC
+        --mDiag = fmap (fmap realPart) mDiagC
+        --wG = diagonal gDiag
+        --gamma = diagonal mDiag
+        --p = fmap (fmap realPart) pC
+
+        -- verify simultaneous diagonalization of m
+        mDiag = adjoint p !*! m !*! p
+        mDiagOff = let all = sum $ fmap (sum . fmap (^(2::Int))) mDiag
+                       diag = quadrance (diagonal mDiag)
                    in 1 - diag / all
+        gamma = diagonal mDiag
 
-        -- eigenvalues of g
-        wG = diagonal gDiag
-
-        -- orthogonalize g
+        -- normalize g
         -- this is where we pass to the eigenbasis
-        df = case length $ filter ((< 1e-3) . abs) $ toList wG of
-               -- full rank
-               0 -> let s = fmap sqrt wG -- scale to set g to identity
-                        --p' = kronecker (fmap recip s) !*! p
-                        p' = p
-                        x = goSubspace f (adjoint basis !*! p') gamma
-                    in adjoint basis !* x
+        project :: (Foldable g, Metric g, Applicative  g, Distributive g, Show (g a))
+                => (forall b. V3 b -> g b) -> f a
+        project proj =
+          let pProj  = fmap proj (proj p)
+              s      = fmap norm pProj -- length of eigenvectors p_i
+              pNorm  = fmap recip s `scaleC` pProj
+              basis' = adjoint (proj basis) !*! pNorm
+              gamma' = s `cmult` proj gamma
+              x      = goSubspace f basis' gamma'
+          in trm "s" (showVec s) $ trm "proj" (showVec $ fmap norm pNorm)
+             -- $ trm "mReconst" (showMatrix $ m !-! (adjoint pNorm !*! kronecker gamma' !*! pNorm))
+             $ basis' !* x
 
-               -- one dependent pair
-               1 -> let s = fmap sqrt $ wG ^.  _xy
-                        --p' = kronecker (fmap recip s) !*! 
-                        p' = fmap (^. _xy) (p ^. _xy)
-                        basis' = basis ^.  _xy
-                        x = goSubspace f (adjoint basis' !*! p')
-                            (gamma ^. _xy)
-                    in adjoint basis' !* x
-
+        -- project out eigenvectors with small eigenvalues
+        df = case length $ filter ((< 1e-1) . abs) $ toList wG of
+               0 -> project id             -- full rank
+               1 -> project (^. _xy)       -- one dependent pair
+               2 -> project (V1 . (^. _x)) -- two dependent pairs
                _ -> error "Too many dependent eigenvectors"
 
         -- next iterate (FIXME: revisit non-negative)
         f'    = fmap (max 1e-8) $ f ^+^ df
 
     -- | Here we optimize the objective within our orthonormal search subspace
-    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g)
+    goSubspace :: forall g. (Foldable g, Metric g, Applicative g, Distributive g, Show (g a))
                => f a        -- ^ current iterate
                -> f (g a)    -- ^ subspace basis
                -> g a        -- ^ gamma, eigenvalues of M
@@ -187,9 +223,9 @@ maxEnt cAim pts models f = go f
         cP :: a -> g a -> a
         cP p x = c0 + c `dot` x + sum ((\x g -> (p+g)*x*x) <$> x <*> gamma) / 2
         cMin = c0 - sum ((\x g -> x*x/g) <$> c <*> gamma) / 2
-        cAim'  = max cAim cMin
+        cAim'  = traceShow ("cMin = ", cMin) $ max cAim cMin
 
-        -- step with Lagrange multipliers alpha and p
+        -- maximal step with Lagrange multipliers alpha and p
         step :: a -> a -> g a
         step p alpha = (\s c g->(alpha * s - c) / (g + alpha + p))
                        <$> s <*> c <*> gamma
@@ -211,10 +247,10 @@ maxEnt cAim pts models f = go f
           let cq = cP 0 x
               cp = cP p x
           case () of
-            _ | cp > c0       -> chopDown False
-              | cq < cAim'    -> chopUp False
-              | norm x > l0   -> chopUp False
-              | otherwise     -> do chopLastX .= x
+            _ | cp > c0       -> tr "cp>c0" $ chopDown False
+              | cq < cAim'    -> tr "cq<cAim" $ chopUp False
+              | norm x > l0   -> tr "too long" $ chopUp False
+              | otherwise     -> do tr "yay" $ chopLastX .= x
                                     chopDown True
           where
             chopDown success = chopAlpha *= 0.93 >> pChop success
@@ -231,13 +267,14 @@ maxEnt cAim pts models f = go f
               aChopDone = cAim' <= cq && cq <= cp && cp <= c0
               pChopDone = p == 0
           a <- use chopAlpha
+          traceShow (a, p, norm x, norm $ basis !* x, cAim', cq, cp, c0) $ return ()
           case () of
             _ | not aChopDone -> alphaChop
-              | not success   -> increaseP >> alphaChop
+              -- | not success   -> tr "increaseP" $ increaseP >> alphaChop
               -- | not pChopDone -> decreaseP >> alphaChop
               | otherwise     -> use chopLastX
           where
-            increaseP = chopP += 0.1 >> chopAlpha .= alpha0
+            --increaseP = chopP += 0.1 >> chopAlpha .= alpha0
             --decreaseP = chopP -= 0.1 >> chopAlpha .= alpha0
 {-# INLINE maxEnt #-}
 
@@ -249,6 +286,10 @@ test pts models f = quadrance (gradS ^/ norm gradS ^-^ gradC ^/ norm gradC) / 2
     gradS = gradEntropy f
     gradC = gradChiSquared pts models f
 {-# INLINE test #-}
+
+-- | Scale column vectors
+scaleC :: (Functor g, Applicative f, Num a) => f a -> f (g a) -> f (g a)
+scaleC v a = (^*) <$> a <*> v
 
 -- | Component-wise multiplication
 cmult :: (Num a, Applicative f) => f a -> f a -> f a
@@ -269,8 +310,8 @@ subspace pts f models = V3 e1 e2 e3
     e3 =   d gs *^ ((f `cmultOp` hc) !* (f `cmult` gs))
        ^-^ d gc *^ ((f `cmultOp` hc) !* (f `cmult` gc))
     hc = hessianChiSquared pts models f
-    gs = gradEntropy f
     gc = gradChiSquared pts models f
+    gs = gradEntropy f
     d grad = recip $ sqrt $ F.sum $ f `cmult` fmap (^2) grad
 {-# INLINE subspace #-}
 

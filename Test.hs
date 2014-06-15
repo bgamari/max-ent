@@ -1,17 +1,21 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
-import Prelude hiding (sum, concat)
+import Prelude hiding (sum, concat, mapM, sequence)
 import Data.Foldable
 import Data.Traversable
 import Data.Complex
 import Control.Applicative
+import Control.Lens
 import Linear
 import Linear.V (V)
 import qualified Linear.V as LV
 import qualified Data.Vector as V
 import GHC.TypeLits (Nat)
+import System.Random.MWC hiding (uniform)
+import Data.Random hiding (uniform)
 
 import MaxEnt
 import FiniteDiff
@@ -49,12 +53,21 @@ linSpace a b n = [a + (b-a)/realToFrac n*realToFrac i | i <- [0..n]]
 uniform :: RealFloat a => Models a
 uniform = l1Normalize $ pure 1
 
+noisify :: (Traversable f, Num a, Distribution Normal a)
+        => a -> f (Point x a) -> IO (f (Point x a))
+noisify sigma pts =
+    createSystemRandom >>= runRVar (mapM addNoise pts)
+  where
+    addNoise p = (\a->p { pY=pY p + a}) <$> normal 0 sigma
+  
 main = do
     let f = uniform
+    let f = l1Normalize $ v [2,2,3,2, 1,8]
+    pts' <- noisify 0.1 pts
     writeFile "points.txt" $ unlines
-      $ map (\(Point (V1 x) y s)->show x++"\t"++show y++"\t"++show s) pts
-    print $ takeWhile (\f->test pts models f > 0.1)
-          $ maxEnt 1 pts models f
+      $ map (\(Point (V1 x) y s)->show x++"\t"++show y++"\t"++show s) pts'
+    print -- $ takeWhile (\f->test pts' models f > 0.1)
+          $ maxEnt 1e-2 pts' models f
 
 testGrad = do
     let f :: RealFloat a => Models a

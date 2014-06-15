@@ -3,6 +3,11 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module MaxEnt where
 -- ( Point(..)
@@ -138,16 +143,21 @@ maxEnt :: forall f x a.
        -> f (Model x)           -- ^ models
        -> f a                   -- ^ initial weights
        -> [f a]                 -- ^ iterates
-maxEnt cAim pts models f = go f
+maxEnt cAim pts models f0 = go f0
   where
-    offTol = 1e-6 -- fraction of frobenius norm of g that can be off-diagonal
+    offTol = 1e-3 -- fraction of frobenius norm of g that can be off-diagonal
     go :: f a -> [f a]
     go f
-      | mDiagOff > offTol = error "m not diagonal"
+      | mDiagOff > offTol = trm "p" (showMatrix p)
+                          $ trm "g" (showMatrix g)
+                          $ trm "m" (showMatrix m)
+                          $ trm "mDiag" (show mDiagOff)
+                          $ trm "f" (showVec f)
+                          $ error "m not diagonal"
       | otherwise = trm "f" (showVec f)
                   $ trm "g" (showMatrix g)
                   $ trm "m" (showMatrix m)
-                  $ trm "mDiag" (showMatrix mDiag)
+                  $ trm "mDiag" (show mDiagOff)
                   $ trm "ddC" (showMatrix $ hessianChiSquared pts models f)
                   $ trm "wG" (showVec wG)
                   $ trm "basis" (showMatrix basis)
@@ -171,7 +181,7 @@ maxEnt cAim pts models f = go f
         --p = fmap (fmap realPart) pC
 
         -- verify simultaneous diagonalization of m
-        mDiag = adjoint p !*! m !*! p
+        mDiag = p !*! m !*! adjoint p
         mDiagOff = let all = sum $ fmap (sum . fmap (^(2::Int))) mDiag
                        diag = quadrance (diagonal mDiag)
                    in 1 - diag / all
@@ -179,24 +189,23 @@ maxEnt cAim pts models f = go f
 
         -- normalize g
         -- this is where we pass to the eigenbasis
-        project :: (Foldable g, Metric g, Applicative  g, Distributive g, Show (g a))
-                => (forall b. V3 b -> g b) -> f a
+        project :: forall g. (Foldable g, Metric g, Applicative g, Distributive g, Show (g a))
+                => (forall b. Eigenspace V3 b -> g b) -> f a
         project proj =
-          let pProj  = fmap proj (proj p)
+          let pProj  = proj p
               s      = fmap norm pProj -- length of eigenvectors p_i
               pNorm  = fmap recip s `scaleC` pProj
-              basis' = adjoint (proj basis) !*! pNorm
+              basis' = pNorm !*! basis
               gamma' = s `cmult` proj gamma
-              x      = goSubspace f basis' gamma'
-          in trm "s" (showVec s) $ trm "proj" (showVec $ fmap norm pNorm)
-             -- $ trm "mReconst" (showMatrix $ m !-! (adjoint pNorm !*! kronecker gamma' !*! pNorm))
-             $ basis' !* x
+              x :: g a
+              x      = goSubspace f (adjoint basis') gamma'
+          in adjoint basis' !* x
 
         -- project out eigenvectors with small eigenvalues
         df = case length $ filter ((< 1e-1) . abs) $ toList wG of
-               0 -> project id             -- full rank
-               1 -> project (^. _xy)       -- one dependent pair
-               2 -> project (V1 . (^. _x)) -- two dependent pairs
+               0 -> project id                      -- full rank
+               1 -> project ((^. _xy) . getEig)     -- one dependent pair
+               2 -> project (V1 . (^. _x) . getEig) -- two dependent pairs
                _ -> error "Too many dependent eigenvectors"
 
         -- next iterate (FIXME: revisit non-negative)
@@ -267,7 +276,7 @@ maxEnt cAim pts models f = go f
               aChopDone = cAim' <= cq && cq <= cp && cp <= c0
               pChopDone = p == 0
           a <- use chopAlpha
-          traceShow (a, p, norm x, norm $ basis !* x, cAim', cq, cp, c0) $ return ()
+          traceShow ("a="++show a++"    p="++show p++"   norm x="++show (norm x)++"    norm df="++show (norm $ basis !* x)++"    Caim="++show cAim'++"    Cq="++show cq++"    Cp="++show cp++"    C0="++show c0) $ return ()
           case () of
             _ | not aChopDone -> alphaChop
               -- | not success   -> tr "increaseP" $ increaseP >> alphaChop
@@ -316,13 +325,19 @@ subspace pts f models = V3 e1 e2 e3
 {-# INLINE subspace #-}
 
 -- | A vector given in the eigenbasis of an operator of type @f (f a)@
-newtype Eigenspace f a = Eig (f a)
---eigen3 :: f (f Double) -> (f (Eigenspace f a), f a)
+newtype Eigenspace f a = Eig {getEig :: f a}
+                       deriving ( Show, Functor, Foldable, Traversable
+                                , Applicative, Monad, Additive, Metric
+                                )
+        
+instance (Foldable f, Trace f, Monad f) => Trace (Eigenspace f)
+instance (Distributive f) => Distributive (Eigenspace f) where
+    distribute = Eig . distribute . fmap (\(Eig e)->e)
 
-eigen3 :: M33 Double -> (M33 Double, V3 Double)
+eigen3 :: V3 (V3 Double) -> (Eigenspace V3 (V3 Double), V3 Double)
 eigen3 a =
   let (lambd, p) = LA.eigS $ m33ToHMat a
-  in (hmatToM33 p, hvecToV3 lambd)
+  in (Eig $ adjoint $ hmatToM33 p, hvecToV3 lambd)
 {-# INLINE eigen3 #-}
 
 m33ToHMat :: HM.Element a => M33 a -> HM.Matrix a

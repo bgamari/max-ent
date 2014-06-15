@@ -256,7 +256,8 @@ maxEnt cAim pts models f0 = go f0
           let cq = cP 0 x
               cp = cP p x
           case () of
-            _ | cp > c0       -> tr "cp>c0" $ chopDown False
+              -- We want to lower chi-squared but Cp > C0
+            _ | cp > c0 && c0 > cAim' -> tr "cp>c0" $ chopDown False
               | cq < cAim'    -> tr "cq<cAim" $ chopUp False
               | norm x > l0   -> tr "too long" $ chopUp False
               | otherwise     -> do tr "yay" $ chopLastX .= x
@@ -273,7 +274,10 @@ maxEnt cAim pts models f0 = go f0
           x <- uses chopAlpha $ step p
           let cq  = cP 0 x
               cp = cP p x
-              aChopDone = cAim' <= cq && cq <= cp && cp <= c0
+              -- If c0 started below cAim we don't want to constrain
+              -- outselves to solutions where (cAim' <= cq <= c0) as
+              -- this is unattainable
+              aChopDone = cAim' <= cq && cq <= cp && (cp <= c0 || c0 < cAim')
               pChopDone = p == 0
           a <- use chopAlpha
           traceShow ("a="++show a++"    p="++show p++"   norm x="++show (norm x)++"    norm df="++show (norm $ basis !* x)++"    Caim="++show cAim'++"    Cq="++show cq++"    Cp="++show cp++"    C0="++show c0) $ return ()
@@ -329,7 +333,7 @@ newtype Eigenspace f a = Eig {getEig :: f a}
                        deriving ( Show, Functor, Foldable, Traversable
                                 , Applicative, Monad, Additive, Metric
                                 )
-        
+
 instance (Foldable f, Trace f, Monad f) => Trace (Eigenspace f)
 instance (Distributive f) => Distributive (Eigenspace f) where
     distribute = Eig . distribute . fmap (\(Eig e)->e)
